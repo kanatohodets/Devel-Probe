@@ -14,6 +14,8 @@
 #define PROBE_SETTINGS_TYPE_INDEX 0
 #define PROBE_SETTINGS_ARGS_INDEX 1
 
+#define PROBE_MAX_EVAL_SKIP_DEPTH 10
+
 /*
  * Use preprocessor macros for time-sensitive operations.
  */
@@ -140,8 +142,11 @@ static OP* probe_nextstate(pTHX)
     OP* ret = probe_nextstate_orig(aTHX);
 
     do {
+        const PERL_CONTEXT *cx;
         const char* file = 0;
         int line = 0;
+        int caller_line = 0;
+        int caller_level = 0;
         AV* settings = 0;
         SV* user_callback_arg = 0;
         int type = PROBE_TYPE_NONE;
@@ -152,6 +157,28 @@ static OP* probe_nextstate(pTHX)
 
         file = CopFILE(PL_curcop);
         line = CopLINE(PL_curcop);
+        /* Walk up the stack until we get to a non-string-eval frame */
+        while (caller_level < PROBE_MAX_EVAL_SKIP_DEPTH) {
+            cx = caller_cx(caller_level, NULL);
+            if (!cx || CxTYPE(cx) != CXt_EVAL || !CxREALEVAL(cx)) {
+                break;
+            }
+
+            /* Now that we're in a string eval ("a real eval'), file name
+             * becomes '(eval 1234)' and the line numbers get reset. So in order
+             * to keep things sensible, we need to combine the eval line
+             * picture with the 'real' line picture, and ignore the 'eval'
+             * filename.
+             */
+            file = CopFILE(cx->blk_oldcop);
+            caller_line = CopLINE(cx->blk_oldcop);
+            /* 'eval' lines are 1 indexed, so each additional eval introduces
+             * another line of drift: -1 per eval encountered corrects the
+             * drift.
+             */
+            line = line + caller_line - 1;
+            caller_level++;
+        }
         TRACE(("PROBE check [%s] [%d]\n", file, line));
         if (!probe_lookup(aTHX_ file, line, PROBE_ACTION_LOOKUP)) {
             break;
